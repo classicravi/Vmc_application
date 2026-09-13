@@ -116,6 +116,7 @@ function completion(state: WorkflowState) {
 }
 
 function allStageItemsComplete(state: WorkflowState, stage: number): boolean {
+  if (stage === 0) return state.poweredOn;
   if (stage === 1) return state.machineChecks.every(Boolean);
   if (stage === 2) return state.tools.every(Boolean);
   if (stage === 3) return state.workpiece.every(Boolean);
@@ -203,6 +204,7 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
 
       const current = data?.state && isValidState(data.state) ? (data.state as WorkflowState) : defaultState;
+      if (!current.poweredOn) return errorResponse("Machine must be powered on before confirming checklist items.", 409);
       if (current.stage !== stage) return errorResponse("This check does not belong to the current workflow stage.", 409);
 
       const field = stage === 1 ? "machineChecks" : stage === 2 ? "tools" : "workpiece";
@@ -262,6 +264,7 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
 
       const current = data?.state && isValidState(data.state) ? (data.state as WorkflowState) : defaultState;
+      if (!current.poweredOn) return errorResponse("Machine must be powered on to start operation.", 409);
       if (current.stage !== 5) return errorResponse("Operation is not available until all setup stages are complete.", 409);
 
       const c = completion(current);

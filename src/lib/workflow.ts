@@ -16,6 +16,7 @@ export interface ApiResponse {
   state: WorkflowState;
   restored?: boolean;
   message?: string;
+  source?: 'api' | 'local';
 }
 
 export const defaultState: WorkflowState = {
@@ -61,13 +62,14 @@ function cacheLocal(state: WorkflowState): void {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* ignore quota errors */ }
 }
 
-function readLocal(): WorkflowState | null {
+function readLocal(): WorkflowState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as WorkflowState;
+    if (!raw) return defaultState;
+    const parsed = JSON.parse(raw) as WorkflowState;
+    return parsed.stage !== undefined ? parsed : defaultState;
   } catch {
-    return null;
+    return defaultState;
   }
 }
 
@@ -78,52 +80,132 @@ export async function loadWorkflow(): Promise<{ state: WorkflowState; restored: 
     return { state: result.state, restored: !!result.restored, source: 'api' };
   } catch {
     const local = readLocal();
-    if (local) return { state: local, restored: true, source: 'local' };
+    if (local && local.poweredOn) return { state: local, restored: true, source: 'local' };
     return { state: defaultState, restored: false, source: 'default' };
   }
 }
 
 export async function powerOn(): Promise<ApiResponse> {
-  const result = await apiCall('workflow/power', { method: 'POST' });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('workflow/power', { method: 'POST' });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const nextState: WorkflowState = {
+      ...current,
+      poweredOn: true,
+      stage: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, message: 'Control online (offline mode). Machine checks are ready.', source: 'local' };
+  }
 }
 
 export async function confirmCheck(stage: number, index: number): Promise<ApiResponse> {
-  const result = await apiCall('workflow/check', {
-    method: 'POST',
-    body: JSON.stringify({ stage, index }),
-  });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('workflow/check', {
+      method: 'POST',
+      body: JSON.stringify({ stage, index }),
+    });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const field = stage === 1 ? 'machineChecks' : stage === 2 ? 'tools' : 'workpiece';
+    const flags = [...current[field]];
+    flags[index] = true;
+    const nextState: WorkflowState = {
+      ...current,
+      [field]: flags,
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, message: 'Confirmation recorded (offline mode).', source: 'local' };
+  }
 }
 
 export async function nextStage(): Promise<ApiResponse> {
-  const result = await apiCall('workflow/next', { method: 'POST' });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('workflow/next', { method: 'POST' });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const nextStageVal = Math.min(5, current.stage + 1) as WorkflowStage;
+    const nextState: WorkflowState = {
+      ...current,
+      stage: nextStageVal,
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, message: 'Stage complete (offline mode).', source: 'local' };
+  }
 }
 
 export async function startOperation(): Promise<ApiResponse> {
-  const result = await apiCall('operation/start', { method: 'POST' });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('operation/start', { method: 'POST' });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const progress = current.operationProgress >= 100 ? 0 : current.operationProgress;
+    const nextState: WorkflowState = {
+      ...current,
+      operationStatus: 'RUNNING',
+      operationProgress: progress,
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, message: 'Operation started (offline mode).', source: 'local' };
+  }
 }
 
 export async function stopOperation(): Promise<ApiResponse> {
-  const result = await apiCall('operation/stop', { method: 'POST' });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('operation/stop', { method: 'POST' });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const nextState: WorkflowState = {
+      ...current,
+      operationStatus: 'STOPPED',
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, message: 'Operation stopped by operator (offline mode).', source: 'local' };
+  }
 }
 
 export async function advanceProgress(): Promise<ApiResponse> {
-  const result = await apiCall('operation/progress', { method: 'POST' });
-  cacheLocal(result.state);
-  return result;
+  try {
+    const result = await apiCall('operation/progress', { method: 'POST' });
+    cacheLocal(result.state);
+    return { ...result, source: 'api' };
+  } catch {
+    const current = readLocal();
+    const progress = Math.min(100, current.operationProgress + 1);
+    const nextState: WorkflowState = {
+      ...current,
+      operationProgress: progress,
+      operationStatus: progress >= 100 ? 'STOPPED' : 'RUNNING',
+      updatedAt: new Date().toISOString(),
+    };
+    cacheLocal(nextState);
+    return { state: nextState, source: 'local' };
+  }
 }
 
 export async function resetWorkflow(): Promise<ApiResponse> {
-  const result = await apiCall('workflow/reset', { method: 'POST' });
+  try {
+    await apiCall('workflow/reset', { method: 'POST' });
+  } catch {
+    /* ignore network failure on reset */
+  }
   localStorage.removeItem(STORAGE_KEY);
-  return result;
+  const resetState = { ...defaultState, updatedAt: new Date().toISOString() };
+  return { state: resetState, message: 'Workflow reset.' };
 }
